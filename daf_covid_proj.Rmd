@@ -1,0 +1,409 @@
+---
+title: "daf_covid_proj"
+author: "Shashi"
+date: "9/7/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(stringr)
+library(tidyverse)
+library(lubridate)
+```
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+## We are importing the data from the csv collated by the John Hopkins University
+
+We are directly importing the data from the github repo maintained by the university. The github repo is updated daily with new cases and deaths from the US and around the world. We then create four tibbles from the data obtained.
+
+```{r get_data}
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_"
+file_names <- c("confirmed_global.csv", "deaths_global.csv", "confirmed_US.csv", "deaths_US.csv")
+urls <- str_c(url_in, file_names)
+
+global_cases <- read_csv(urls[1], show_col_types = FALSE)
+global_deaths <- read_csv(urls[2], show_col_types = FALSE)
+us_cases <- read_csv(urls[3], show_col_types = FALSE)
+us_deaths <- read_csv(urls[4], show_col_types = FALSE)
+head(global_cases)
+```
+## Preprocessing and cleaning the data
+
+```{r}
+global_cases <- global_cases %>%
+    pivot_longer(cols = -c(`Province/State`, 
+                           `Country/Region`, Lat, Long), 
+                 names_to = "date", 
+               values_to = "cases") %>%
+select(-c(Lat,Long))
+head(global_cases)
+```
+```{r}
+global_deaths <- global_deaths %>%
+    pivot_longer(cols = -c(`Province/State`, 
+                           `Country/Region`, Lat, Long), 
+                 names_to = "date", 
+               values_to = "deaths") %>%
+select(-c(Lat,Long))
+head(global_deaths)
+```
+```{r}
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename("Country_Region" = `Country/Region`,
+         "Province_State" = `Province/State`) %>%
+  mutate(date = mdy(date))
+global
+```
+```{r}
+summary(global)
+
+```
+
+```{r}
+global <- global %>%
+  filter(cases > 0)
+```
+
+```{r}
+global
+```
+
+```{r}
+us_cases <- us_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = 'date',
+               values_to = 'cases') %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+```
+```{r}
+us_cases
+```
+
+```{r}
+us_deaths <- us_deaths %>%
+  pivot_longer(cols = -(UID:Population),
+               names_to = 'date',
+               values_to = 'deaths') %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+```
+
+```{r}
+us <- us_cases %>%
+  full_join(us_deaths)
+```
+```{r}
+us
+```
+
+```{r}
+global <- global %>%
+  unite("combined_key", c(Province_State, Country_Region), sep = ",", na.rm = TRUE, remove=FALSE)
+```
+
+```{r}
+global
+```
+
+In order to calculate the number of cases and deaths in relation to the population of that particular country, we are importing another dataset that contains the population data and joining it with our main dataset.
+
+```{r}
+uid_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid <- read_csv(uid_url) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+```
+```{r}
+global <- global %>%
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(c("Province_State", "Country_Region", "date", "cases", "deaths", "Population","combined_key"))
+```
+
+```{r}
+global
+```
+
+Calculating the cases per million and deaths per million in order to do further analysis and prediction on that data.
+
+```{r}
+country_cases_deaths_per_mil <- global %>%
+  group_by(Country_Region, Province_State)%>%
+  summarise(country_cases = max(cases), country_deaths = max(deaths), population = max(Population))%>%
+  group_by(Country_Region)%>%
+  summarise(country_cases = sum(country_cases), country_deaths = sum(country_deaths), population = sum(population))%>%
+  mutate(cases_per_million = country_cases*1000000/population,deaths_per_million = country_deaths*1000000/population)
+country_cases_deaths_per_mil
+```
+
+Here we are calculating the top countries in the world by deaths per million, the bars are shaded according to the number of cases, this helps us in giving an understanding of how many absolute cases are there in that particular country. 
+
+```{r}
+plot_by_country <- country_cases_deaths_per_mil %>%
+  slice_max(deaths_per_million, n=20) %>%
+  ggplot(aes(x = Country_Region, y = deaths_per_million, fill = country_cases))+ geom_bar(stat = "identity")+
+  theme(axis.text.x = element_text(angle = 90))
+  
+plot_by_country
+```
+
+We are calculating the daily new cases and deaths in the world as a whole. We further plot this data to give us a good understanding of how this pandemic has evolved since its inception.
+
+```{r}
+world_new_cases_deaths <- global%>%
+  group_by(date)%>%
+  summarise(cases = sum(cases), deaths = sum(deaths)) %>% 
+  mutate(new_cases = cases - lag(cases), new_deaths = deaths-lag(deaths))%>%
+  ungroup()%>%
+  filter(new_deaths > 0)
+world_new_cases_deaths
+```
+
+Plotting daily new cases and deaths in the world
+
+```{r}
+plot_new_cases_deaths <- world_new_cases_deaths %>%
+  ggplot(aes(x=date,y=new_cases)) +
+  geom_line(aes(color = "new_cases")) + 
+  geom_line(aes(y = new_deaths,color = "new_deaths")) + 
+  scale_y_log10() + theme(legend.position = "bottom",
+                          axis.text.x = element_text(angle = 90)) +
+  labs(title = "New Covid19 cases and deaths in the World", y=NULL)
+plot_new_cases_deaths
+
+```
+
+Plotting the cumulative cases and deaths in the world.
+
+```{r}
+plot_world_cases_deaths <- world_new_cases_deaths %>%
+  ggplot(aes(x=date,y=cases)) +
+  geom_line(aes(color = "cases")) + 
+  geom_line(aes(y = deaths,color = "deaths")) + 
+  scale_y_log10() + theme(legend.position = "top",
+                          axis.text.x = element_text(angle = 90)) +
+  labs(title = "Covid19 cases and deaths in the World", y=NULL)
+plot_world_cases_deaths
+
+```
+
+Building a Linear Regression model to predict new deaths every day by taking into consideration the new cases everyday.
+
+```{r}
+world_model <- lm(new_deaths~new_cases, data = world_new_cases_deaths)
+summary(world_model)
+```
+
+Plotting our model and predicting the increase in new deaths everyday with the increase in new cases everyday.
+
+```{r}
+world_total_w_pred <- world_new_cases_deaths %>%
+  mutate(pred = predict(world_model))
+world_total_w_pred %>% ggplot() +
+  geom_point(aes(x = new_cases, y = new_deaths), color = "blue")+
+  geom_line(aes(x=new_cases, y = pred), color = "red")
+```
+
+
+```{r}
+us
+```
+
+Calculating the deaths per million in each county for each day.
+
+```{r}
+us_by_state <- us %>%
+  group_by(Province_State, Country_Region,date)%>%
+  summarise(cases = sum(cases), deaths = sum(deaths), Population = sum(Population)) %>%
+  mutate(deaths_per_mil = deaths*1000000/Population)%>%
+  select(Province_State, Country_Region, date, cases, deaths, deaths_per_mil, Population)%>%
+  ungroup()
+```
+```{r}
+us_by_state
+```
+
+Plotting the top 20 states in terms of highest deaths per million, the bars are shaded according to the number of cases, this helps us in giving an understanding of how many absolute cases are there in that particular state. 
+
+
+```{r}
+plot_by_state <- us_by_state %>%
+  group_by(Province_State) %>%
+  summarise(state_cases = max(cases), state_deaths  = max(deaths), deaths_per_mil = max(deaths_per_mil), population = max(Population)) %>%
+  slice_max(deaths_per_mil, n=20) %>%
+  ggplot(aes(x = Province_State, y = deaths_per_mil, fill = state_cases))+ geom_bar(stat = "identity")+
+  theme(axis.text.x = element_text(angle = 90))
+plot_by_state
+```
+
+
+
+```{r}
+us_total <- us_by_state %>%
+  group_by(Country_Region, date)%>%
+  summarise(Population = sum(Population), cases = sum(cases), deaths = sum(deaths))%>%
+  mutate(deaths_per_mil = deaths*1000000/Population)%>%
+  select(Country_Region, date, cases, deaths, Population, deaths_per_mil)%>%
+  ungroup()
+```
+```{r}
+us_total
+```
+
+Plotting the evolution of cases and deaths in the US due to the Covid19 pandemic.
+
+```{r}
+us_cases_deaths_plot<- us_total %>%
+  filter(cases>0) %>%
+  ggplot(aes(x=date, y = cases)) +
+  geom_line(aes(color = "cases")) + 
+  geom_point(aes(color = "cases"))+
+  geom_line(aes(y=deaths,color = "deaths")) + 
+  geom_point(aes(y = deaths,color = "deaths")) + 
+  scale_y_log10() + theme(legend.position = "bottom",
+                          axis.text.x = element_text(angle = 90)) +
+  labs(title = "Covid19 in the US", y=NULL)
+us_cases_deaths_plot
+  
+```
+
+Plotting the evolution of cases and deaths in the state of Colorado due to the Covid19 pandemic.
+
+
+```{r}
+state <- "Colorado"
+state_cases_deaths_plot <- us_by_state %>%
+  filter(Province_State == state) %>%
+  filter(cases > 0)%>%
+  ggplot(aes(x=date, y = cases)) +
+  geom_line(aes(color = "cases")) + 
+  geom_point(aes(color = "cases"))+
+  geom_line(aes(y=deaths,color = "deaths")) + 
+  geom_point(aes(y = deaths,color = "deaths")) + 
+  scale_y_log10() + theme(legend.position = "bottom",
+                          axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("Covid19 in ", state), y=NULL)
+
+state_cases_deaths_plot
+```
+
+Calculating new cases and deaths in the United States everyday.
+
+```{r}
+us_by_state <- us_by_state %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+us_total <- us_total %>%
+  mutate(new_cases = cases -lag(cases),
+         new_deaths = deaths - lag(deaths))
+```
+
+```{r}
+us_by_state
+us_total
+```
+
+Plotting new cases and deaths in the US everyday
+
+```{r}
+us_total %>%
+  ggplot(aes(x=date, y=new_cases)) + 
+  geom_line(aes(color = 'new_cases')) + 
+  geom_point(aes(color = "new_cases")) + 
+  geom_line(aes(y = new_deaths, color = 'new_deaths'))+
+  geom_point(aes(y = new_deaths, color = 'new_deaths')) +
+   scale_y_log10()+
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle=90))+
+  labs(title = "COVID19 in USA",y=NULL)
+```
+
+Plotting new cases and deaths in the state of Colorado everyday.
+
+```{r}
+state <- "Colorado"
+us_by_state %>%
+  filter(Province_State == state) %>%
+  ggplot(aes(x=date, y=new_cases)) + 
+  geom_line(aes(color = 'new_cases')) + 
+  geom_point(aes(color = "new_cases")) + 
+  geom_line(aes(y = new_deaths, color = 'new_deaths'))+
+  geom_point(aes(y = new_deaths, color = 'new_deaths')) +
+  scale_y_log10()+
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle=90))+
+  labs(title = str_c("COVID19 in ",state),y=NULL)
+```
+
+Finding the states with the lowest deaths per thousand.
+
+```{r}
+us_state_totals <- us_by_state %>%
+  group_by(Province_State)%>%
+  summarise(deaths = max(deaths), cases = max(cases), population = max(Population),
+            cases_per_thousand = 1000*cases/population,
+            deaths_per_thousand = 1000*deaths/population)%>%
+  filter(cases>0, population>0)
+us_state_totals %>%
+  slice_min(deaths_per_thousand, n=10)
+```
+
+Finding the states with the highest deaths per thousand.
+
+```{r}
+us_state_totals %>%
+  slice_max(deaths_per_thousand, n=10)
+```
+
+Creating a Linear Model to predict how high can deaths and cases can reach in the US depending on the rise of cases.
+
+```{r}
+model = lm(deaths ~ cases, data = us_total)
+summary(model)
+```
+
+Plotting the findings we obtained through our model.
+
+```{r}
+us_total_w_pred <- us_total %>%
+  mutate(pred = predict(model))
+us_total_w_pred %>% ggplot() +
+  geom_point(aes(x = cases, y = deaths), color = "blue")+
+  geom_line(aes(x=cases, y = pred), color = "red")
+```
+
+### Conclusion
+
+Whatever analysis we do depends on the quality of the data we obtain, our data is obtained from countless different sources around the world and it's quality is definitely questionable. 
+
+But from doing whatever we can do with this data we obtained some important insights, things like Mississippi having the highest deaths per thousand in the US, when it doesn't even have the highest cases or deaths.
+
+We also tried to predict how many new deaths can occur in the world depending on the new cases and also the final number of deaths in the US depending on the final cases.
+
+In conclusion, we can say that even though the data is not perfect, we can arrive at valuable conclusions which can then help us to stitch together a solution in the field.
+
+### Bias
+Biases in our data
+
+1. Wrong results corrupting the data.
+2. Possibility of multiple tests for one person and no tests for asymptomatic persons.
+3. Died with different disease but may counted as covid.
+4. Private testing may not be included.
+5. No proper availability of testing kits.
+6. Delay in adding the cases to the data.
+7. Different data from different countries tends to be inconsistent.
+
+
+Biases in our analysis includes using the simpler linear model to predict the deaths or cases instead of more powerful models, because linear model makes our work that much easier.
+
